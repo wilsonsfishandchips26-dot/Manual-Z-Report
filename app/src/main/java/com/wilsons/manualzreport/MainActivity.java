@@ -6,7 +6,6 @@ import android.os.Bundle;
 import android.os.RemoteException;
 import android.text.InputType;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -51,7 +50,11 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("manual_z_report", MODE_PRIVATE);
         buildUi();
-        InnerPrinterManager.getInstance().bindService(this, printerCallback);
+        try {
+            InnerPrinterManager.getInstance().bindService(this, printerCallback);
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not connect to SUNMI printer: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     @Override
