@@ -1,1 +1,2 @@
 GitHub connection test from ChatGPT for the SUNMI Manual Z Report project.
+Trigger Android build workflow after repository installation.
