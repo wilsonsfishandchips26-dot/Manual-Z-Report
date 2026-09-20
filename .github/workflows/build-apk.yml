@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,8 +28,21 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Manual-Z-Report-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK in repository
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk Manual-Z-Report.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Manual-Z-Report.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged"
+          else
+            git commit -m "Publish latest Manual Z Report APK"
+            git push
+          fi
