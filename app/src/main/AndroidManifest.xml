@@ -1,13 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- SUNMI printer service must be visible to apps targeting modern Android. -->
-    <queries>
-        <package android:name="woyou.aidlservice.jiuiv5" />
-        <intent>
-            <action android:name="woyou.aidlservice.jiuiv5.IWoyouService" />
-        </intent>
-    </queries>
+    <!-- Bluetooth permissions for an already-paired external receipt printer. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <application
         android:allowBackup="true"
