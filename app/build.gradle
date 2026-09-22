@@ -10,8 +10,8 @@ android {
         applicationId 'com.wilsons.manualzreport'
         minSdk 23
         targetSdk 35
-        versionCode 2
-        versionName '1.1'
+        versionCode 3
+        versionName '1.2'
     }
 
     buildTypes {
@@ -28,5 +28,4 @@ android {
 }
 
 dependencies {
-    implementation 'com.sunmi:printerlibrary:1.0.24'
 }
