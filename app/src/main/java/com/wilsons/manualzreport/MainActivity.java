@@ -1,9 +1,15 @@
 package com.wilsons.manualzreport;
 
+import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothSocket;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
-import android.os.RemoteException;
 import android.text.InputType;
 import android.view.Gravity;
 import android.widget.Button;
@@ -13,18 +19,24 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import com.sunmi.peripheral.printer.InnerPrinterCallback;
-import com.sunmi.peripheral.printer.InnerPrinterManager;
-import com.sunmi.peripheral.printer.SunmiPrinterService;
-
+import java.io.OutputStream;
+import java.nio.charset.Charset;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
 
 public class MainActivity extends Activity {
 
-    private SunmiPrinterService printer;
-    private boolean printerBinding = false;
+    private static final int REQUEST_BLUETOOTH_CONNECT = 1001;
+    private static final UUID SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+
+    private BluetoothAdapter bluetoothAdapter;
+    private BluetoothSocket printerSocket;
+    private OutputStream printerOutput;
+    private boolean connectingPrinter = false;
     private boolean pendingPrint = false;
     private boolean pendingReprint = false;
 
@@ -37,84 +49,178 @@ public class MainActivity extends Activity {
     private TextView calculations;
     private TextView printerStatus;
 
-    private final InnerPrinterCallback printerCallback = new InnerPrinterCallback() {
-        @Override
-        protected void onConnected(SunmiPrinterService service) {
-            printer = service;
-            printerBinding = false;
-            runOnUiThread(() -> {
-                updatePrinterStatus("Printer: connected");
-                Toast.makeText(MainActivity.this, "SUNMI printer connected", Toast.LENGTH_SHORT).show();
-                if (pendingPrint) {
-                    boolean reprint = pendingReprint;
-                    pendingPrint = false;
-                    pendingReprint = false;
-                    printReport(reprint);
-                }
-            });
-        }
-
-        @Override
-        protected void onDisconnected() {
-            printer = null;
-            printerBinding = false;
-            runOnUiThread(() -> updatePrinterStatus("Printer: disconnected"));
-        }
-    };
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("manual_z_report", MODE_PRIVATE);
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
         buildUi();
-        connectPrinter();
-    }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        if (printer == null) {
-            connectPrinter();
+        if (bluetoothAdapter == null) {
+            updatePrinterStatus("Bluetooth printer: Bluetooth not available");
+        } else if (!hasBluetoothPermission()) {
+            requestBluetoothPermission();
+        } else {
+            showSavedPrinterStatus();
         }
     }
 
     @Override
     protected void onDestroy() {
-        try {
-            InnerPrinterManager.getInstance().unBindService(this, printerCallback);
-        } catch (Exception ignored) { }
+        closePrinterConnection();
         super.onDestroy();
     }
 
-    private void connectPrinter() {
-        if (printer != null) {
-            updatePrinterStatus("Printer: connected");
-            return;
-        }
-        if (printerBinding) {
-            updatePrinterStatus("Printer: connecting...");
-            return;
-        }
+    private boolean hasBluetoothPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true;
+        return checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+    }
 
-        printerBinding = true;
-        updatePrinterStatus("Printer: connecting...");
-        try {
-            boolean started = InnerPrinterManager.getInstance().bindService(this, printerCallback);
-            if (!started) {
-                printerBinding = false;
-                updatePrinterStatus("Printer: SUNMI service not found");
-            }
-        } catch (Exception e) {
-            printerBinding = false;
-            updatePrinterStatus("Printer: connection failed");
-            Toast.makeText(this, "SUNMI printer connection error: " + safeMessage(e), Toast.LENGTH_LONG).show();
+    private void requestBluetoothPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQUEST_BLUETOOTH_CONNECT);
         }
     }
 
-    private void updatePrinterStatus(String value) {
-        if (printerStatus != null) {
-            printerStatus.setText(value);
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_BLUETOOTH_CONNECT) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                showSavedPrinterStatus();
+            } else {
+                updatePrinterStatus("Bluetooth printer: permission required");
+                Toast.makeText(this, "Please allow Bluetooth permission so the app can use your paired printer.", Toast.LENGTH_LONG).show();
+            }
         }
+    }
+
+    private void showSavedPrinterStatus() {
+        String name = prefs.getString("printerName", "");
+        String address = prefs.getString("printerAddress", "");
+        if (address.isEmpty()) {
+            updatePrinterStatus("Bluetooth printer: not selected");
+        } else {
+            updatePrinterStatus("Bluetooth printer: " + (name.isEmpty() ? address : name) + " (not connected)");
+        }
+    }
+
+    private void chooseBluetoothPrinter() {
+        if (bluetoothAdapter == null) {
+            Toast.makeText(this, "Bluetooth is not available on this till.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!hasBluetoothPermission()) {
+            requestBluetoothPermission();
+            return;
+        }
+        if (!bluetoothAdapter.isEnabled()) {
+            Toast.makeText(this, "Turn Bluetooth on first, then try again.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        try {
+            Set<BluetoothDevice> paired = bluetoothAdapter.getBondedDevices();
+            if (paired == null || paired.isEmpty()) {
+                Toast.makeText(this, "No paired Bluetooth devices found. Pair the printer in Android Bluetooth settings first.", Toast.LENGTH_LONG).show();
+                return;
+            }
+
+            ArrayList<BluetoothDevice> devices = new ArrayList<>(paired);
+            String[] labels = new String[devices.size()];
+            for (int i = 0; i < devices.size(); i++) {
+                BluetoothDevice d = devices.get(i);
+                String n = d.getName();
+                labels[i] = (n == null || n.trim().isEmpty() ? "Bluetooth device" : n) + "\n" + d.getAddress();
+            }
+
+            new AlertDialog.Builder(this)
+                    .setTitle("Select your receipt printer")
+                    .setItems(labels, (dialog, which) -> {
+                        BluetoothDevice d = devices.get(which);
+                        String n = d.getName();
+                        if (n == null || n.trim().isEmpty()) n = "Bluetooth printer";
+                        prefs.edit()
+                                .putString("printerName", n)
+                                .putString("printerAddress", d.getAddress())
+                                .apply();
+                        connectToPrinter(d.getAddress());
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } catch (SecurityException e) {
+            requestBluetoothPermission();
+        }
+    }
+
+    private void connectSavedPrinter() {
+        String address = prefs.getString("printerAddress", "");
+        if (address.isEmpty()) {
+            chooseBluetoothPrinter();
+            return;
+        }
+        connectToPrinter(address);
+    }
+
+    private void connectToPrinter(String address) {
+        if (!hasBluetoothPermission()) {
+            requestBluetoothPermission();
+            return;
+        }
+        if (connectingPrinter) return;
+
+        closePrinterConnection();
+        connectingPrinter = true;
+        String name = prefs.getString("printerName", "Bluetooth printer");
+        updatePrinterStatus("Bluetooth printer: connecting to " + name + "...");
+
+        new Thread(() -> {
+            try {
+                BluetoothDevice device = bluetoothAdapter.getRemoteDevice(address);
+                BluetoothSocket socket = device.createRfcommSocketToServiceRecord(SPP_UUID);
+                socket.connect();
+                OutputStream out = socket.getOutputStream();
+                printerSocket = socket;
+                printerOutput = out;
+                connectingPrinter = false;
+                runOnUiThread(() -> {
+                    updatePrinterStatus("Bluetooth printer: " + name + " connected");
+                    Toast.makeText(MainActivity.this, "Bluetooth printer connected", Toast.LENGTH_SHORT).show();
+                    if (pendingPrint) {
+                        boolean reprint = pendingReprint;
+                        pendingPrint = false;
+                        pendingReprint = false;
+                        printReport(reprint);
+                    }
+                });
+            } catch (Exception e) {
+                connectingPrinter = false;
+                closePrinterConnection();
+                runOnUiThread(() -> {
+                    updatePrinterStatus("Bluetooth printer: connection failed");
+                    Toast.makeText(MainActivity.this, "Could not connect to printer: " + safeMessage(e), Toast.LENGTH_LONG).show();
+                });
+            }
+        }).start();
+    }
+
+    private boolean printerConnected() {
+        return printerSocket != null && printerSocket.isConnected() && printerOutput != null;
+    }
+
+    private void closePrinterConnection() {
+        try {
+            if (printerOutput != null) printerOutput.close();
+        } catch (Exception ignored) { }
+        try {
+            if (printerSocket != null) printerSocket.close();
+        } catch (Exception ignored) { }
+        printerOutput = null;
+        printerSocket = null;
+    }
+
+    private void updatePrinterStatus(String value) {
+        if (printerStatus != null) printerStatus.setText(value);
     }
 
     private String safeMessage(Exception e) {
@@ -126,35 +232,32 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(18), dp(18), dp(36));
+        root.setPadding(dp(18), dp(14), dp(18), dp(30));
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("Manual Z Report");
-        title.setTextSize(28);
+        title.setText("Manual Z Report v1.2");
+        title.setTextSize(26);
         title.setGravity(Gravity.CENTER);
-        title.setPadding(0, 0, 0, dp(8));
+        title.setPadding(0, 0, 0, dp(6));
         root.addView(title);
 
         printerStatus = new TextView(this);
-        printerStatus.setText("Printer: connecting...");
-        printerStatus.setTextSize(18);
+        printerStatus.setText("Bluetooth printer: checking...");
+        printerStatus.setTextSize(17);
         printerStatus.setGravity(Gravity.CENTER);
-        printerStatus.setPadding(0, 0, 0, dp(8));
+        printerStatus.setPadding(0, 0, 0, dp(6));
         root.addView(printerStatus);
 
-        Button reconnectPrinter = button("RECONNECT PRINTER");
-        reconnectPrinter.setOnClickListener(v -> {
-            try {
-                if (printer != null || printerBinding) {
-                    InnerPrinterManager.getInstance().unBindService(this, printerCallback);
-                }
-            } catch (Exception ignored) { }
-            printer = null;
-            printerBinding = false;
-            connectPrinter();
-        });
-        root.addView(reconnectPrinter);
+        LinearLayout printerButtons = new LinearLayout(this);
+        printerButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button selectPrinter = button("SELECT BLUETOOTH PRINTER");
+        selectPrinter.setOnClickListener(v -> chooseBluetoothPrinter());
+        printerButtons.addView(selectPrinter, weightedButtonParams());
+        Button connectPrinter = button("CONNECT PRINTER");
+        connectPrinter.setOnClickListener(v -> connectSavedPrinter());
+        printerButtons.addView(connectPrinter, weightedButtonParams());
+        root.addView(printerButtons);
 
         addSection(root, "Shop settings");
         shopName = addTextField(root, "Shop name", prefs.getString("shopName", "Wilsons Fish N Chips"));
@@ -183,7 +286,7 @@ public class MainActivity extends Activity {
 
         calculations = new TextView(this);
         calculations.setTextSize(18);
-        calculations.setPadding(0, dp(12), 0, dp(16));
+        calculations.setPadding(0, dp(10), 0, dp(12));
         root.addView(calculations);
 
         Button calculate = button("CALCULATE / PREVIEW");
@@ -215,11 +318,17 @@ public class MainActivity extends Activity {
         setContentView(scroll);
     }
 
+    private LinearLayout.LayoutParams weightedButtonParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(56), 1f);
+        lp.setMargins(dp(4), dp(4), dp(4), dp(4));
+        return lp;
+    }
+
     private void addSection(LinearLayout root, String label) {
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextSize(21);
-        t.setPadding(0, dp(18), 0, dp(6));
+        t.setPadding(0, dp(14), 0, dp(5));
         root.addView(t);
     }
 
@@ -229,23 +338,42 @@ public class MainActivity extends Activity {
         e.setText(value);
         e.setTextSize(18);
         e.setSingleLine(true);
-        e.setPadding(dp(10), dp(10), dp(10), dp(10));
+        e.setPadding(dp(10), dp(8), dp(10), dp(8));
         root.addView(e, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         return e;
     }
 
     private EditText addMoneyField(LinearLayout root, String hint, String value) {
-        EditText e = addTextField(root, hint, value);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView pound = new TextView(this);
+        pound.setText("£");
+        pound.setTextSize(22);
+        pound.setGravity(Gravity.CENTER);
+        pound.setPadding(dp(6), 0, dp(6), 0);
+        row.addView(pound, new LinearLayout.LayoutParams(dp(42), LinearLayout.LayoutParams.MATCH_PARENT));
+
+        EditText e = new EditText(this);
+        e.setHint(hint);
+        e.setText(value);
+        e.setTextSize(18);
+        e.setSingleLine(true);
         e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        e.setPadding(dp(8), dp(8), dp(10), dp(8));
+        row.addView(e, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+        root.addView(row, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         return e;
     }
 
     private Button button(String text) {
         Button b = new Button(this);
         b.setText(text);
-        b.setTextSize(18);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58));
-        lp.setMargins(0, dp(8), 0, 0);
+        b.setTextSize(17);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56));
+        lp.setMargins(0, dp(6), 0, 0);
         b.setLayoutParams(lp);
         return b;
     }
@@ -263,11 +391,13 @@ public class MainActivity extends Activity {
     }
 
     private void printReport(boolean reprintLast) {
-        if (printer == null) {
+        if (!printerConnected()) {
             pendingPrint = true;
             pendingReprint = reprintLast;
-            connectPrinter();
-            Toast.makeText(this, "Connecting to SUNMI printer...", Toast.LENGTH_SHORT).show();
+            connectSavedPrinter();
+            if (!prefs.getString("printerAddress", "").isEmpty()) {
+                Toast.makeText(this, "Connecting to Bluetooth printer...", Toast.LENGTH_SHORT).show();
+            }
             return;
         }
 
@@ -284,19 +414,32 @@ public class MainActivity extends Activity {
             prefs.edit().putString("lastReport", report).apply();
         }
 
-        try {
-            printer.printerInit(null);
-            printer.setAlignment(0, null);
-            printer.setFontSize(24f, null);
-            printer.printText(report, null);
-            printer.lineWrap(4, null);
-            try { printer.cutPaper(null); } catch (Exception ignored) { }
-            Toast.makeText(this, reprintLast ? "Reprinting last report" : "Z report sent to printer", Toast.LENGTH_SHORT).show();
-        } catch (RemoteException e) {
-            printer = null;
-            updatePrinterStatus("Printer: disconnected");
-            Toast.makeText(this, "Printer error: " + safeMessage(e), Toast.LENGTH_LONG).show();
-        }
+        final String finalReport = report;
+        new Thread(() -> {
+            try {
+                byte[] init = new byte[]{0x1B, 0x40};
+                byte[] alignLeft = new byte[]{0x1B, 0x61, 0x00};
+                byte[] feed = new byte[]{0x0A, 0x0A, 0x0A, 0x0A};
+                byte[] cut = new byte[]{0x1D, 0x56, 0x00};
+
+                printerOutput.write(init);
+                printerOutput.write(alignLeft);
+                printerOutput.write(finalReport.getBytes(Charset.forName("CP437")));
+                printerOutput.write(feed);
+                printerOutput.write(cut);
+                printerOutput.flush();
+
+                runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                        reprintLast ? "Reprinting last report" : "Z report sent to Bluetooth printer",
+                        Toast.LENGTH_SHORT).show());
+            } catch (Exception e) {
+                closePrinterConnection();
+                runOnUiThread(() -> {
+                    showSavedPrinterStatus();
+                    Toast.makeText(MainActivity.this, "Printer error: " + safeMessage(e), Toast.LENGTH_LONG).show();
+                });
+            }
+        }).start();
     }
 
     private String buildReport() {
