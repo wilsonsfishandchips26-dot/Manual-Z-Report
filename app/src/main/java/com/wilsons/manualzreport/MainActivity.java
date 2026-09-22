@@ -24,6 +24,10 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     private SunmiPrinterService printer;
+    private boolean printerBinding = false;
+    private boolean pendingPrint = false;
+    private boolean pendingReprint = false;
+
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("dd/MM/yyyy hh:mm a", Locale.UK);
     private SharedPreferences prefs;
 
@@ -31,17 +35,30 @@ public class MainActivity extends Activity {
     private EditText startingCash, cashPayments, cashRefunds, paidIn, paidOut, actualCash;
     private EditText grossSales, refunds, discounts, cardPayments;
     private TextView calculations;
+    private TextView printerStatus;
 
     private final InnerPrinterCallback printerCallback = new InnerPrinterCallback() {
         @Override
         protected void onConnected(SunmiPrinterService service) {
             printer = service;
-            runOnUiThread(() -> Toast.makeText(MainActivity.this, "SUNMI printer connected", Toast.LENGTH_SHORT).show());
+            printerBinding = false;
+            runOnUiThread(() -> {
+                updatePrinterStatus("Printer: connected");
+                Toast.makeText(MainActivity.this, "SUNMI printer connected", Toast.LENGTH_SHORT).show();
+                if (pendingPrint) {
+                    boolean reprint = pendingReprint;
+                    pendingPrint = false;
+                    pendingReprint = false;
+                    printReport(reprint);
+                }
+            });
         }
 
         @Override
         protected void onDisconnected() {
             printer = null;
+            printerBinding = false;
+            runOnUiThread(() -> updatePrinterStatus("Printer: disconnected"));
         }
     };
 
@@ -50,10 +67,14 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences("manual_z_report", MODE_PRIVATE);
         buildUi();
-        try {
-            InnerPrinterManager.getInstance().bindService(this, printerCallback);
-        } catch (Exception e) {
-            Toast.makeText(this, "Could not connect to SUNMI printer: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        connectPrinter();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (printer == null) {
+            connectPrinter();
         }
     }
 
@@ -63,6 +84,42 @@ public class MainActivity extends Activity {
             InnerPrinterManager.getInstance().unBindService(this, printerCallback);
         } catch (Exception ignored) { }
         super.onDestroy();
+    }
+
+    private void connectPrinter() {
+        if (printer != null) {
+            updatePrinterStatus("Printer: connected");
+            return;
+        }
+        if (printerBinding) {
+            updatePrinterStatus("Printer: connecting...");
+            return;
+        }
+
+        printerBinding = true;
+        updatePrinterStatus("Printer: connecting...");
+        try {
+            boolean started = InnerPrinterManager.getInstance().bindService(this, printerCallback);
+            if (!started) {
+                printerBinding = false;
+                updatePrinterStatus("Printer: SUNMI service not found");
+            }
+        } catch (Exception e) {
+            printerBinding = false;
+            updatePrinterStatus("Printer: connection failed");
+            Toast.makeText(this, "SUNMI printer connection error: " + safeMessage(e), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void updatePrinterStatus(String value) {
+        if (printerStatus != null) {
+            printerStatus.setText(value);
+        }
+    }
+
+    private String safeMessage(Exception e) {
+        String msg = e.getMessage();
+        return msg == null || msg.trim().isEmpty() ? e.getClass().getSimpleName() : msg;
     }
 
     private void buildUi() {
@@ -76,8 +133,28 @@ public class MainActivity extends Activity {
         title.setText("Manual Z Report");
         title.setTextSize(28);
         title.setGravity(Gravity.CENTER);
-        title.setPadding(0, 0, 0, dp(16));
+        title.setPadding(0, 0, 0, dp(8));
         root.addView(title);
+
+        printerStatus = new TextView(this);
+        printerStatus.setText("Printer: connecting...");
+        printerStatus.setTextSize(18);
+        printerStatus.setGravity(Gravity.CENTER);
+        printerStatus.setPadding(0, 0, 0, dp(8));
+        root.addView(printerStatus);
+
+        Button reconnectPrinter = button("RECONNECT PRINTER");
+        reconnectPrinter.setOnClickListener(v -> {
+            try {
+                if (printer != null || printerBinding) {
+                    InnerPrinterManager.getInstance().unBindService(this, printerCallback);
+                }
+            } catch (Exception ignored) { }
+            printer = null;
+            printerBinding = false;
+            connectPrinter();
+        });
+        root.addView(reconnectPrinter);
 
         addSection(root, "Shop settings");
         shopName = addTextField(root, "Shop name", prefs.getString("shopName", "Wilsons Fish N Chips"));
@@ -187,7 +264,10 @@ public class MainActivity extends Activity {
 
     private void printReport(boolean reprintLast) {
         if (printer == null) {
-            Toast.makeText(this, "SUNMI printer is not connected", Toast.LENGTH_LONG).show();
+            pendingPrint = true;
+            pendingReprint = reprintLast;
+            connectPrinter();
+            Toast.makeText(this, "Connecting to SUNMI printer...", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -213,7 +293,9 @@ public class MainActivity extends Activity {
             try { printer.cutPaper(null); } catch (Exception ignored) { }
             Toast.makeText(this, reprintLast ? "Reprinting last report" : "Z report sent to printer", Toast.LENGTH_SHORT).show();
         } catch (RemoteException e) {
-            Toast.makeText(this, "Printer error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            printer = null;
+            updatePrinterStatus("Printer: disconnected");
+            Toast.makeText(this, "Printer error: " + safeMessage(e), Toast.LENGTH_LONG).show();
         }
     }
 
